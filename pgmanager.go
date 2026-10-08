@@ -12,18 +12,55 @@ import (
 )
 
 const (
-  pgReconnectTimeout = 60 * time.Second
+  // Default maximum time pglnw keeps trying to reconnect when the connection
+  // is lost. Can be overridden with "ReconnectTimeout" in the config.json
+  defaultReconnectTimeout = 60 * time.Second
+
+  // Maximum duration of ONE connection attempt (connect + ping). Without it,
+  // an unreachable server (dropped packets, half-open TCP connection) would
+  // block pgx.Connect() far beyond the reconnect timeout.
+  pgAttemptTimeout = 5 * time.Second
 )
+
+// ConfigDuration is a time.Duration that can be read from the JSON config
+// either as a string understood by time.ParseDuration ("90s", "2m", "1m30s")
+// or as a number of seconds (90)
+type ConfigDuration time.Duration
+
+func (d *ConfigDuration) UnmarshalJSON(b []byte) error {
+  var v interface{}
+  if err := json.Unmarshal(b, &v); err != nil {
+    return err
+  }
+
+  switch val := v.(type) {
+  case float64:
+    *d = ConfigDuration(time.Duration(val * float64(time.Second)))
+  case string:
+    parsed, err := time.ParseDuration(val)
+    if err != nil {
+      return fmt.Errorf("invalid duration %q (examples: \"90s\", \"2m\", 90): %w", val, err)
+    }
+    *d = ConfigDuration(parsed)
+  default:
+    return fmt.Errorf("invalid duration %s (examples: \"90s\", \"2m\", 90)", string(b))
+  }
+  return nil
+}
 
 // PGClientConfig represents the PostgreSQL client configuration
 type PGClientConfig struct {
-  Hostname         string  `json:"Hostname"`
-  Port             string  `json:"Port"`
-  Database         string  `json:"Database"`
-  Username         string  `json:"Username"`
-  Password         string  `json:"Password"`
-  Sslmode          string  `json:"Sslmode"`
-  ApplicationName  string  `json:"ApplicationName"`
+  Hostname         string          `json:"Hostname"`
+  Port             string          `json:"Port"`
+  Database         string          `json:"Database"`
+  Username         string          `json:"Username"`
+  Password         string          `json:"Password"`
+  Sslmode          string          `json:"Sslmode"`
+  ApplicationName  string          `json:"ApplicationName"`
+
+  // Optional: maximum time to try to reconnect once the connection is lost.
+  // Default is 60s when not set in the config.json
+  ReconnectTimeout *ConfigDuration `json:"ReconnectTimeout"`
 }
 
 
@@ -31,6 +68,9 @@ type PGClientConfig struct {
 type PGManager struct {
 	conn   *pgx.Conn
 	Config *PGClientConfig
+
+	// maximum time to try to reconnect (from ReconnectTimeout in config.json)
+	ReconnectTimeout time.Duration
 }
 
 // NewPGManager creates a new PGManager instance with the given configuration
@@ -40,8 +80,17 @@ func NewPGManager(configPath string) (*PGManager, error) {
 		return nil, err
 	}
 
+	reconnectTimeout := defaultReconnectTimeout
+	if config.ReconnectTimeout != nil {
+		reconnectTimeout = time.Duration(*config.ReconnectTimeout)
+		if reconnectTimeout <= 0 {
+			return nil, fmt.Errorf("invalid \"ReconnectTimeout\" in %s: it must be greater than 0", configPath)
+		}
+	}
+
 	return &PGManager{
-		Config: config,
+		Config:           config,
+		ReconnectTimeout: reconnectTimeout,
 	}, nil
 }
 
@@ -62,14 +111,17 @@ func loadConfig(configPath string) (*PGClientConfig, error) {
 	return config, nil
 }
 
+// connString builds the connection string from the configuration
+func (pm *PGManager) connString() string {
+  return fmt.Sprintf("host=%s port=%s dbname=%s user=%s password=%s sslmode=%s application_name=%s",
+                     pm.Config.Hostname, pm.Config.Port, pm.Config.Database, pm.Config.Username,
+                     pm.Config.Password, pm.Config.Sslmode, pm.Config.ApplicationName)
+}
+
 // PGConnect establishes a new connection to the PostgreSQL database
 func (pm *PGManager) PGConnect() (*pgx.Conn, error) {
 
-  connStr := fmt.Sprintf("host=%s port=%s dbname=%s user=%s password=%s sslmode=%s application_name=%s", 
-                          pm.Config.Hostname, pm.Config.Port, pm.Config.Database, pm.Config.Username, 
-                          pm.Config.Password, pm.Config.Sslmode, pm.Config.ApplicationName)
-
-	conn, err := pgx.Connect(context.Background(), connStr)
+	conn, err := pgx.Connect(context.Background(), pm.connString())
 
 	if err != nil {
 		return nil, err
@@ -79,11 +131,20 @@ func (pm *PGManager) PGConnect() (*pgx.Conn, error) {
 	return conn, nil
 }
 
+// PGPing checks the current connection. It gives up after pgAttemptTimeout
+// instead of blocking forever when the network silently drops the packets.
+func (pm *PGManager) PGPing() error {
+	ctx, cancel := context.WithTimeout(context.Background(), pgAttemptTimeout)
+	defer cancel()
+	return pm.conn.Ping(ctx)
+}
+
 // PGReconnectWithTimeout attempts to reconnect to the PostgreSQL database within a specified timeout
 func (pm *PGManager) PGReconnectWithTimeout(timeout time.Duration, err error) error {
 
   var message string
 	startTime := time.Now()
+	lastErr := err
 
 	for time.Since(startTime) < timeout {
 
@@ -130,31 +191,64 @@ func (pm *PGManager) PGReconnectWithTimeout(timeout time.Duration, err error) er
        }
        fmt.Print(string(colorReset))
     }
- 
-		err := pm.pgConnectWithRetry()
-		if err == nil {
+
+		// A single attempt can never last longer than pgAttemptTimeout, nor
+		// than the time left before the global timeout is reached
+		attemptTimeout := pgAttemptTimeout
+		if remaining := timeout - time.Since(startTime); remaining < attemptTimeout {
+			attemptTimeout = remaining
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
+		connErr := pm.pgConnectWithRetry(ctx)
+		cancel()
+
+		if connErr == nil {
       fmt.Print(string(colorGreen))
 			fmt.Printf("\nReconnected successfully after %s downtime\n", time.Since(startTime).Round(time.Millisecond).String())
       fmt.Print(string(colorReset))
 			return nil
 		}
+		lastErr = connErr
 
-		time.Sleep(500 * time.Millisecond)
+		// wait before the next attempt, but never beyond the timeout
+		pause := 500 * time.Millisecond
+		if remaining := timeout - time.Since(startTime); remaining < pause {
+			pause = remaining
+		}
+		if pause > 0 {
+			time.Sleep(pause)
+		}
 	}
 
+	if lastErr != nil {
+		return fmt.Errorf("Failed to reconnect within the %s timeout (last error: %w)", timeout, lastErr)
+	}
 	return fmt.Errorf("Failed to reconnect within the %s timeout", timeout)
 }
 
-// pgConnectWithRetry tries to connect to the PostgreSQL database.
-func (pm *PGManager) pgConnectWithRetry() error {
-	conn, err := pm.PGConnect()
+// pgConnectWithRetry tries to connect to the PostgreSQL database. The whole
+// attempt (connect + ping) is bound to the deadline of ctx.
+func (pm *PGManager) pgConnectWithRetry(ctx context.Context) error {
+	conn, err := pgx.Connect(ctx, pm.connString())
 	if err != nil {
 		return err
 	}
 
-	err = conn.Ping(context.Background())
+	err = conn.Ping(ctx)
 	if err != nil {
+		// don't leak the connection we just opened
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = conn.Close(closeCtx)
+		cancel()
 		return err
+	}
+
+	// the new connection replaces the broken one: release the old one
+	if pm.conn != nil {
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = pm.conn.Close(closeCtx)
+		cancel()
 	}
 
 	pm.conn = conn

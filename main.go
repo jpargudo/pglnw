@@ -37,8 +37,8 @@ var (
   rsleep_time               time.Duration
   silent_start              bool 
 
-  Version      = "v.1.0.0"
-  Release_date = "January, 2nd 2026"
+  Version      = "v.1.1.0"
+  Release_date = "October, 8th 2026"
 
   License = heredoc.Doc(`
 **The PostgreSQL License**

@@ -100,6 +100,28 @@ Descriptions](https://www.postgresql.org/docs/current/libpq-ssl.html#LIBPQ-SSL-P
 Most common values would be there either `disable` for non-SSL connexion or
 `require` for SSL ones.
 
+"ReconnectTimeout" is optional. It is the maximum time pglnw keeps trying to
+reconnect once the connection to PostgreSQL is lost. When this delay is
+reached, pglnw prints an error and exits with a non-zero exit code. Without
+this key the default is 60 seconds.
+
+The value is either a string with a unit (`"90s"`, `"2m"`, `"1m30s"`, same
+syntax as `-time` or `-sleep`) or a number of seconds (`90`). It has to be
+greater than 0.
+
+```code
+{
+   "Hostname":         "localhost",
+   "Port"    :         "5432",
+   "Database":         "mydbname",
+   "Username":         "myusername",
+   "Password":         "123456",
+   "Sslmode" :         "disable",
+   "ApplicationName" : "pglnw",
+   "ReconnectTimeout": "90s"
+}
+```
+
 ### **help** (flag) [OPTIONAL]
 
 Originally, "heredocs" were used in the main program to show this help, but it

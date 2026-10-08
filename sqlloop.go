@@ -367,11 +367,13 @@ func do_sqlloop() {
 
             //test connection
             //err := pgManager.conn.Ping(context.Background())
-            err = pgManager.conn.Ping(context.Background())
+            err = pgManager.PGPing()
             if err != nil {
-              err := pgManager.PGReconnectWithTimeout(pgReconnectTimeout,err)
+              err := pgManager.PGReconnectWithTimeout(pgManager.ReconnectTimeout, err)
               if err != nil {
-                stopCh <- true
+                // No "stopCh <- true" here: stopCh is unbuffered and this
+                // goroutine is one of its readers, so the send would block
+                // forever. exit1() ends the whole program anyway.
                 exit1("\nUnable to reconnect to PostgreSQL:\n", err)
               }
             }

@@ -166,13 +166,13 @@ func ReadPatroniConfig () PatroniConfig {
 func Replication_info(user_gucs string, pgManager *PGManager) {
 
   //test connection
-	err := pgManager.conn.Ping(context.Background())
+	err := pgManager.PGPing()
 	if err != nil {
     fmt.Print(string(colorRed))
     //fmt.Println("+ Failover or switchover in progress ?")
     //fmt.Println("+ Trying to reconnect every half-second for 20s max")
     fmt.Print(string(colorReset))
-		err := pgManager.PGReconnectWithTimeout(pgReconnectTimeout,err)
+		err := pgManager.PGReconnectWithTimeout(pgManager.ReconnectTimeout,err)
 		if err != nil {
       exit1("Failed to reconnect:\n", err)
 	  }

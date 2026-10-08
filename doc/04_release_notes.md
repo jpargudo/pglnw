@@ -1,5 +1,27 @@
 # Release notes
 
+## Version 1.0.1 (October, 8th 2026)
+
+### Major
+
+- added a new config value in `config.json`: `ReconnectTimeout` see part 3 of
+  documentation for more info. Now the timeout (when a disconnection occurs)
+  can be configured that way. It's no more 60s hardcoded. 
+
+- more over, with the help of Claude, I've been able to correct the "freeze" 
+  when this timeout occured. Now the code is way cleaner!.. And, the timeout
+  works for real now... and is working in both SQL-Loop and Patroni modes
+
+### Minor
+
+- built with Go 1.26.0 (2 versions since January...)
+
+- rebuild of binaries with dependencies upgrades:
+  - github.com/jackc/pgx/v5 => v5.11.0
+  - golang.org/x/crypto => v0.57.0
+  - golang.org/x/sys => v0.48.0
+  - golang.org/x/text => v0.42.0
+
 ## Version 1.0.0 (January, 2nd 2026)
 
 ### Major

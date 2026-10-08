@@ -1,4 +1,4 @@
-# pglnw v.1.0.0 documentation
+# pglnw v.1.1.0 documentation
 
 ## [Overview](01_overview.md)
 
